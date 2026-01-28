@@ -1,14 +1,3 @@
-"""
-Cross-View Hand Matching: Dorsal to Palmar Retrieval
-Dataset: 11K Hands (https://sites.google.com/view/11khands)
-
-Architecture:
-- Twin network with shared ResNet50 encoder
-- Projection head: 2048 → 512 → 128
-- Contrastive loss with margin=2.0
-- Subject-level train/val/test split
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
