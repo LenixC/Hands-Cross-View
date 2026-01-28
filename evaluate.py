@@ -1,8 +1,3 @@
-"""
-Evaluation script for trained hand matching model
-Loads a checkpoint and evaluates on test set
-"""
-
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -15,7 +10,6 @@ from tqdm import tqdm
 import json
 import pandas as pd
 import random
-
 
 
 class ProjectionHead(nn.Module):
@@ -37,7 +31,7 @@ class HandMatchingModel(nn.Module):
     """Twin network with shared ResNet50 encoder + projection head"""
     def __init__(self, embedding_dim=128):
         super().__init__()
-        resnet = models.resnet50(pretrained=True)
+        resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
         self.encoder = nn.Sequential(*list(resnet.children())[:-1])
         
         self.projection = ProjectionHead(output_dim=embedding_dim)
@@ -54,40 +48,51 @@ class HandMatchingModel(nn.Module):
 class HandRetrievalDataset(Dataset):
     """Dataset for retrieval evaluation (query-gallery setup)"""
     def __init__(self, data_root: Path, subject_ids: List[str], 
-                 query_view='dorsal', gallery_view='palmar', transform=None):
+                 query_view='dorsal', gallery_view='palmar', transform=None,
+                 max_images_per_subject=None):
         self.data_root = Path(data_root)
         self.subject_ids = set(subject_ids)
         self.query_view = query_view
         self.gallery_view = gallery_view
         self.transform = transform
+        self.max_images_per_subject = max_images_per_subject
         
         metadata_path = self.data_root / "HandInfo.csv"
         self.metadata = pd.read_csv(metadata_path)
         
-        self.metadata = self.metadata[self.metadata['id'].isin(self.subject_ids)]
+        self.metadata = self.metadata[self.metadata['id'].astype(str).isin(self.subject_ids)]
         
         self.queries = []
         self.gallery = []
         
         for subject_id in self.subject_ids:
-            subject_data = self.metadata[self.metadata['id'] == subject_id]
+            subject_data = self.metadata[self.metadata['id'].astype(str) == subject_id]
             
             query_images = subject_data[subject_data['aspectOfHand'].str.contains(query_view, case=False, na=False)]['imageName'].tolist()
             
             gallery_images = subject_data[subject_data['aspectOfHand'].str.contains(gallery_view, case=False, na=False)]['imageName'].tolist()
             
+            if self.max_images_per_subject:
+                query_images = query_images[:self.max_images_per_subject]
+                gallery_images = gallery_images[:self.max_images_per_subject]
+            
             if len(query_images) > 0 and len(gallery_images) > 0:
-                query_img = query_images[0]
-                gallery_img = gallery_images[0]
+                for query_img in query_images:
+                    self.queries.append({
+                        'path': self.data_root / 'Hands' / query_img, 
+                        'subject': str(subject_id)
+                    })
                 
-                self.queries.append({
-                    'path': self.data_root / 'Hands' / query_img, 
-                    'subject': subject_id
-                })
-                self.gallery.append({
-                    'path': self.data_root / 'Hands' / gallery_img, 
-                    'subject': subject_id
-                })
+                for gallery_img in gallery_images:
+                    self.gallery.append({
+                        'path': self.data_root / 'Hands' / gallery_img, 
+                        'subject': str(subject_id)
+                    })
+        
+        print(f"Retrieval dataset: {len(self.queries)} queries ({len(self.subject_ids)} subjects), "
+              f"{len(self.gallery)} gallery items ({len(self.subject_ids)} subjects)")
+        print(f"Avg images per subject: Query={len(self.queries)/len(self.subject_ids):.1f}, "
+              f"Gallery={len(self.gallery)/len(self.subject_ids):.1f}")
         
         print(f"Retrieval dataset: {len(self.queries)} queries, {len(self.gallery)} gallery items")
     
@@ -142,20 +147,49 @@ def extract_embeddings(model, dataloader, device):
 def compute_retrieval_metrics(query_embeddings, query_subjects, 
                               gallery_embeddings, gallery_subjects):
     """
-    Compute retrieval metrics: mean rank and Recall@K
+    Compute retrieval metrics with embedding aggregation per subject.
+    Multiple images per subject are averaged into a single embedding.
     """
-    similarities = query_embeddings @ gallery_embeddings.T
+    def aggregate_by_subject(embeddings, subjects):
+        unique_subjects = []
+        aggregated_embeddings = []
+        
+        subject_to_embeddings = {}
+        for emb, subj in zip(embeddings, subjects):
+            if subj not in subject_to_embeddings:
+                subject_to_embeddings[subj] = []
+            subject_to_embeddings[subj].append(emb)
+        
+        for subj in sorted(subject_to_embeddings.keys()):
+            unique_subjects.append(subj)
+            subject_embeddings = np.array(subject_to_embeddings[subj])
+            avg_embedding = subject_embeddings.mean(axis=0)
+            avg_embedding = avg_embedding / np.linalg.norm(avg_embedding)
+            aggregated_embeddings.append(avg_embedding)
+        
+        return np.array(aggregated_embeddings), unique_subjects
+    
+    print("Aggregating query embeddings by subject...")
+    query_agg, query_subjects_unique = aggregate_by_subject(query_embeddings, query_subjects)
+    
+    print("Aggregating gallery embeddings by subject...")
+    gallery_agg, gallery_subjects_unique = aggregate_by_subject(gallery_embeddings, gallery_subjects)
+    
+    print(f"Aggregated to {len(query_subjects_unique)} unique query subjects "
+          f"and {len(gallery_subjects_unique)} unique gallery subjects")
+    
+    similarities = query_agg @ gallery_agg.T
     
     ranks = []
     recall_at_k = {1: 0, 5: 0, 10: 0}
     
-    for i, query_subject in enumerate(query_subjects):
+    for i, query_subject in enumerate(query_subjects_unique):
         scores = similarities[i]
         sorted_indices = np.argsort(scores)[::-1]
         
         correct_match_rank = None
         for rank, idx in enumerate(sorted_indices, start=1):
-            if gallery_subjects[idx] == query_subject:
+            if gallery_subjects_unique[idx] == query_subject:
                 correct_match_rank = rank
                 break
         
@@ -167,7 +201,7 @@ def compute_retrieval_metrics(query_embeddings, query_subjects,
                     recall_at_k[k] += 1
     
     mean_rank = np.mean(ranks)
-    num_queries = len(query_subjects)
+    num_queries = len(query_subjects_unique)
     
     metrics = {
         'mean_rank': mean_rank,
@@ -246,7 +280,7 @@ def main():
     metadata_path = Path(args.data_root) / "HandInfo.csv"
     metadata = pd.read_csv(metadata_path)
     
-    all_subjects = metadata['id'].unique().tolist()
+    all_subjects = metadata['id'].astype(str).unique().tolist()
     print(f"Found {len(all_subjects)} unique subjects")
     
     random.seed(42)
