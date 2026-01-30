@@ -17,15 +17,12 @@ class DINOv2Encoder(nn.Module):
     """DINOv2 ViT-B/14 encoder with projection head"""
     def __init__(self, embedding_dim=256, freeze_backbone=False):
         super().__init__()
-        # Load DINOv2 ViT-B/14 (base model, good balance of speed and quality)
         self.backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
         
-        # Optionally freeze backbone for faster training
         if freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
         
-        # DINOv2 ViT-B/14 outputs 768-dim features
         self.projection = nn.Sequential(
             nn.Linear(768, 512),
             nn.BatchNorm1d(512),
@@ -35,14 +32,11 @@ class DINOv2Encoder(nn.Module):
         )
     
     def forward(self, x):
-        # Extract features from DINOv2
         with torch.set_grad_enabled(self.backbone.training):
-            features = self.backbone(x)  # [batch_size, 768]
+            features = self.backbone(x)  
         
-        # Project to embedding space
         embeddings = self.projection(features)
         
-        # L2 normalize
         embeddings = nn.functional.normalize(embeddings, p=2, dim=1)
         return embeddings
 
@@ -52,7 +46,7 @@ class TripletLoss(nn.Module):
     def __init__(self, margin=0.5, mining_strategy='hard'):
         super().__init__()
         self.margin = margin
-        self.mining_strategy = mining_strategy  # 'hard', 'semi-hard', or 'all'
+        self.mining_strategy = mining_strategy  
     
     def forward(self, embeddings, labels):
         """
@@ -60,9 +54,7 @@ class TripletLoss(nn.Module):
             embeddings: [batch_size, embedding_dim]
             labels: [batch_size] - subject IDs (list or tensor)
         """
-        # Convert labels to tensor if they're a list
         if not isinstance(labels, torch.Tensor):
-            # Create a mapping from subject IDs to integers
             unique_labels = list(set(labels))
             label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
             label_indices = torch.tensor([label_to_idx[label] for label in labels], 
@@ -70,7 +62,6 @@ class TripletLoss(nn.Module):
         else:
             label_indices = labels
         
-        # Compute pairwise distances
         distances = torch.cdist(embeddings, embeddings, p=2)
         
         batch_size = embeddings.size(0)
@@ -78,28 +69,23 @@ class TripletLoss(nn.Module):
         num_triplets = 0
         
         for i in range(batch_size):
-            # Get anchor
             anchor_label = label_indices[i]
             
-            # Find positive samples (same subject, different from anchor)
             positive_mask = (label_indices == anchor_label).clone()
-            positive_mask[i] = False  # Exclude anchor itself
+            positive_mask[i] = False  
             
             if not positive_mask.any():
                 continue
             
-            # Find negative samples (different subject)
             negative_mask = (label_indices != anchor_label)
             
             if not negative_mask.any():
                 continue
             
-            # Get distances to positives and negatives
             positive_distances = distances[i][positive_mask]
             negative_distances = distances[i][negative_mask]
             
             if self.mining_strategy == 'hard':
-                # Hard negative mining: hardest positive, hardest negative
                 hardest_positive_dist = positive_distances.max()
                 hardest_negative_dist = negative_distances.min()
                 
@@ -108,28 +94,23 @@ class TripletLoss(nn.Module):
                 num_triplets += 1
                 
             elif self.mining_strategy == 'semi-hard':
-                # Semi-hard: hardest positive, semi-hard negatives
                 hardest_positive_dist = positive_distances.max()
                 
-                # Semi-hard negatives: d(a,n) > d(a,p) but d(a,n) < d(a,p) + margin
                 semi_hard_negatives = negative_distances[
                     (negative_distances > hardest_positive_dist) & 
                     (negative_distances < hardest_positive_dist + self.margin)
                 ]
                 
                 if len(semi_hard_negatives) > 0:
-                    # Use hardest semi-hard negative
                     hardest_negative_dist = semi_hard_negatives.min()
                 else:
-                    # Fall back to hardest negative
                     hardest_negative_dist = negative_distances.min()
                 
                 loss = torch.clamp(hardest_positive_dist - hardest_negative_dist + self.margin, min=0.0)
                 triplet_loss += loss
                 num_triplets += 1
                 
-            else:  # 'all'
-                # Use all valid triplets
+            else:  
                 for pos_dist in positive_distances:
                     for neg_dist in negative_distances:
                         loss = torch.clamp(pos_dist - neg_dist + self.margin, min=0.0)
@@ -154,7 +135,6 @@ class HandTripletDataset(Dataset):
         self.metadata = pd.read_csv(metadata_path)
         self.metadata = self.metadata[self.metadata['id'].astype(str).isin(self.subject_ids)]
         
-        # Organize images by subject and view
         self.subject_to_images = {}
         
         for subject_id in self.subject_ids:
@@ -172,27 +152,21 @@ class HandTripletDataset(Dataset):
         print(f"Loaded {len(self.valid_subjects)} valid subjects with both dorsal and palmar images")
     
     def __len__(self):
-        # More triplets for better hard negative mining
         return len(self.valid_subjects) * 20
     
     def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]:
-        # Select anchor subject
         anchor_subject = random.choice(self.valid_subjects)
         
-        # Anchor: random view (dorsal or palmar)
         anchor_view = random.choice(['dorsal', 'palmar'])
         anchor_img = random.choice(self.subject_to_images[anchor_subject][anchor_view])
         
-        # Positive: opposite view from same subject
         positive_view = 'palmar' if anchor_view == 'dorsal' else 'dorsal'
         positive_img = random.choice(self.subject_to_images[anchor_subject][positive_view])
         
-        # Negative: random view from different subject
         negative_subject = random.choice([s for s in self.valid_subjects if s != anchor_subject])
         negative_view = random.choice(['dorsal', 'palmar'])
         negative_img = random.choice(self.subject_to_images[negative_subject][negative_view])
         
-        # Load images
         anchor_path = self.data_root / 'Hands' / anchor_img
         positive_path = self.data_root / 'Hands' / positive_img
         negative_path = self.data_root / 'Hands' / negative_img
@@ -222,7 +196,6 @@ class HandBatchDataset(Dataset):
         self.metadata = pd.read_csv(metadata_path)
         self.metadata = self.metadata[self.metadata['id'].astype(str).isin(subject_ids)]
         
-        # Organize images by subject
         self.subject_to_images = {}
         
         for subject_id in self.subject_ids:
@@ -244,19 +217,15 @@ class HandBatchDataset(Dataset):
         return len(self.valid_subjects) * 10
     
     def __getitem__(self, idx):
-        # Select a subject
         subject_idx = idx % len(self.valid_subjects)
         subject_id = self.valid_subjects[subject_idx]
         
-        # Sample multiple images from this subject (mix of dorsal and palmar)
         all_images = self.subject_to_images[subject_id]['all']
         
-        # Ensure we get both dorsal and palmar if possible
         dorsal_images = self.subject_to_images[subject_id]['dorsal']
         palmar_images = self.subject_to_images[subject_id]['palmar']
         
         samples = []
-        # Try to get balanced samples
         n_per_view = self.samples_per_subject // 2
         
         selected_dorsal = random.sample(dorsal_images, min(n_per_view, len(dorsal_images)))
@@ -264,13 +233,11 @@ class HandBatchDataset(Dataset):
         
         selected_images = selected_dorsal + selected_palmar
         
-        # If we don't have enough, sample more from all
         while len(selected_images) < self.samples_per_subject and len(selected_images) < len(all_images):
             remaining = [img for img in all_images if img not in selected_images]
             if remaining:
                 selected_images.append(random.choice(remaining))
         
-        # Load and transform images
         images = []
         for img_name in selected_images:
             img_path = self.data_root / 'Hands' / img_name
@@ -279,7 +246,6 @@ class HandBatchDataset(Dataset):
                 img = self.transform(img)
             images.append(img)
         
-        # Stack into tensor
         images = torch.stack(images)
         
         return images, subject_id
@@ -503,12 +469,12 @@ def main():
         'embedding_dim': 256,
         'triplet_margin': 0.5,
         'mining_strategy': 'hard',  # 'hard', 'semi-hard', or 'all'
-        'batch_size': 8,  # Reduced for memory efficiency
-        'samples_per_subject': 2,  # Images per subject in each batch
+        'batch_size': 8,  
+        'samples_per_subject': 2,  
         'num_epochs': 30,
         'lr': 3e-4,
         'weight_decay': 1e-4,
-        'freeze_backbone': True,  # Set to True to save memory
+        'freeze_backbone': True,  
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
         'checkpoint_dir': './checkpoints_dinov2',
         'seed': 42,
@@ -534,7 +500,6 @@ def main():
     
     Path(config['checkpoint_dir']).mkdir(exist_ok=True, parents=True)
     
-    # DINOv2 uses specific normalization
     train_transform = transforms.Compose([
         transforms.Resize(256),
         transforms.RandomCrop(224),
@@ -553,7 +518,6 @@ def main():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
-    # Load and split data
     metadata_path = Path(config['data_root']) / "HandInfo.csv"
     metadata = pd.read_csv(metadata_path)
     
@@ -574,7 +538,6 @@ def main():
     print(f"Val: {len(val_subjects)} subjects")
     print(f"Test: {len(test_subjects)} subjects")
     
-    # Create datasets - using batch-based approach for better hard negative mining
     train_dataset = HandBatchDataset(
         config['data_root'], train_subjects, transform=train_transform,
         samples_per_subject=config['samples_per_subject']
@@ -595,7 +558,6 @@ def main():
         collate_fn=collate_batch_fn
     )
     
-    # Initialize model
     device = torch.device(config['device'])
     print("\nLoading DINOv2 model...")
     model = DINOv2Encoder(
@@ -609,7 +571,6 @@ def main():
         mining_strategy=config['mining_strategy']
     )
     
-    # Only optimize projection head if backbone is frozen
     if config['freeze_backbone']:
         optimizer = optim.AdamW(
             model.projection.parameters(), 
@@ -633,18 +594,15 @@ def main():
         optimizer, T_max=config['num_epochs'], eta_min=1e-6
     )
     
-    # Training loop
     best_mean_rank = float('inf')
     
     for epoch in range(config['num_epochs']):
         print(f"\nEpoch {epoch+1}/{config['num_epochs']}")
         print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
         
-        # Train
         train_loss = train_epoch_batch(model, train_loader, criterion, optimizer, device, scaler)
         print(f"Train Loss: {train_loss:.4f}")
         
-        # Evaluate retrieval every 5 epochs
         if (epoch + 1) % 5 == 0 or epoch == 0:
             metrics = evaluate_retrieval(model, val_retrieval, device)
             print(f"Val Retrieval - Mean Rank: {metrics['mean_rank']:.2f}, "
@@ -652,7 +610,6 @@ def main():
                   f"R@5: {metrics['recall@5']:.3f}, "
                   f"R@10: {metrics['recall@10']:.3f}")
             
-            # Save best model
             if metrics['mean_rank'] < best_mean_rank:
                 best_mean_rank = metrics['mean_rank']
                 torch.save({
@@ -665,10 +622,8 @@ def main():
                 }, f"{config['checkpoint_dir']}/best_model.pth")
                 print(f"✓ Saved new best model (mean rank: {best_mean_rank:.2f})")
         
-        # Update learning rate
         scheduler.step()
         
-        # Save checkpoint every 10 epochs
         if (epoch + 1) % 10 == 0:
             torch.save({
                 'epoch': epoch,
@@ -677,12 +632,10 @@ def main():
                 'config': config
             }, f"{config['checkpoint_dir']}/checkpoint_epoch_{epoch+1}.pth")
     
-    # Final evaluation on test set
     print("\n" + "="*70)
     print("Final Evaluation on Test Set")
     print("="*70)
     
-    # Load best model
     checkpoint = torch.load(f"{config['checkpoint_dir']}/best_model.pth", weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
@@ -693,7 +646,6 @@ def main():
     print(f"  Recall@5:  {test_metrics['recall@5']:.3f}")
     print(f"  Recall@10: {test_metrics['recall@10']:.3f}")
     
-    # Save test results
     results = {
         'test_metrics': test_metrics,
         'val_metrics': checkpoint.get('metrics', {}),

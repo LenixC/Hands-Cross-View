@@ -130,32 +130,25 @@ class HandRetrievalDataset(Dataset):
         self.transform = transform
         self.max_images_per_subject = max_images_per_subject
         
-        # Load metadata
         metadata_path = self.data_root / "HandInfo.csv"
         self.metadata = pd.read_csv(metadata_path)
         
-        # Filter to only include subjects in our split
         self.metadata = self.metadata[self.metadata['id'].astype(str).isin(self.subject_ids)]
         
-        # Build query and gallery lists - USE ALL IMAGES
         self.queries = []
         self.gallery = []
         
         for subject_id in self.subject_ids:
             subject_data = self.metadata[self.metadata['id'].astype(str) == subject_id]
             
-            # Get ALL query images (e.g., dorsal)
             query_images = subject_data[subject_data['aspectOfHand'].str.contains(query_view, case=False, na=False)]['imageName'].tolist()
             
-            # Get ALL gallery images (e.g., palmar)
             gallery_images = subject_data[subject_data['aspectOfHand'].str.contains(gallery_view, case=False, na=False)]['imageName'].tolist()
             
-            # Limit number of images if specified
             if self.max_images_per_subject:
                 query_images = query_images[:self.max_images_per_subject]
                 gallery_images = gallery_images[:self.max_images_per_subject]
             
-            # Add ALL images for this subject
             if len(query_images) > 0 and len(gallery_images) > 0:
                 for query_img in query_images:
                     self.queries.append({
@@ -463,22 +456,18 @@ def main():
         optimizer, mode='min', factor=0.5, patience=5, 
     )
     
-    # Training loop
     best_val_loss = float('inf')
     best_mean_rank = float('inf')
     
     for epoch in range(config['num_epochs']):
         print(f"\nEpoch {epoch+1}/{config['num_epochs']}")
         
-        # Train
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device, scaler)
         print(f"Train Loss: {train_loss:.4f}")
         
-        # Validate
         val_loss = validate(model, val_loader, criterion, device)
         print(f"Val Loss: {val_loss:.4f}")
         
-        # Evaluate retrieval (every 10 epochs to save time)
         if (epoch + 1) % 10 == 0:
             metrics = evaluate_retrieval(model, val_retrieval, device)
             print(f"Val Retrieval - Mean Rank: {metrics['mean_rank']:.2f}, "
@@ -486,7 +475,6 @@ def main():
                   f"R@5: {metrics['recall@5']:.3f}, "
                   f"R@10: {metrics['recall@10']:.3f}")
             
-            # Save best model based on mean rank
             if metrics['mean_rank'] < best_mean_rank:
                 best_mean_rank = metrics['mean_rank']
                 torch.save({
@@ -498,10 +486,8 @@ def main():
                 }, f"{config['checkpoint_dir']}/best_model.pth")
                 print(f"Saved new best model (mean rank: {best_mean_rank:.2f})")
         
-        # Learning rate scheduling
         scheduler.step(val_loss)
         
-        # Save checkpoint every 10 epochs
         if (epoch + 1) % 10 == 0 and val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
@@ -512,12 +498,10 @@ def main():
                 'config': config
             }, f"{config['checkpoint_dir']}/checkpoint_epoch_{epoch+1}.pth")
     
-    # Final evaluation on test set
     print("\n" + "="*50)
     print("Final Evaluation on Test Set")
     print("="*50)
     
-    # Load best model
     checkpoint = torch.load(f"{config['checkpoint_dir']}/best_model.pth", weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
@@ -527,7 +511,6 @@ def main():
     print(f"Recall@5: {test_metrics['recall@5']:.3f}")
     print(f"Recall@10: {test_metrics['recall@10']:.3f}")
     
-    # Save test results
     with open(f"{config['checkpoint_dir']}/test_results.json", 'w') as f:
         json.dump(test_metrics, f, indent=2)
 
