@@ -119,12 +119,12 @@ With more computational resources:
 
 **Train baseline:**
 ```bash
-python baseline_model.py
+python resnet_contrastive.py
 ```
 
 **Train DINOv2 model:**
 ```bash
-python dinov2_triplet_model.py
+python dino_triplet_hnmining.py
 ```
 
 **Memory-saving config** (edit in dinov2_triplet_model.py):
