@@ -1,5 +1,8 @@
 # Dorsal-to-Palmar Hand Matching
 
+Consider reading the [blog post](https://lenixc.github.io/2026/02/02/cross-view-hands.html). It gives a more narrative look into the problem
+and why and how I made certain decisions. 
+
 ## Problem Statement
 
 Given an image of the back (dorsal) side of a hand, can we identify which image of a palm (palmar) side belongs to the same person? This is a challenging cross-view biometric matching problem where we need to learn identity-preserving features that work across different hand orientations.
