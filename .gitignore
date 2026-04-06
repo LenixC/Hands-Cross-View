@@ -17,9 +17,6 @@ __pycache__/
 # Linting
 .ruff_cache/
 
-# Generated outputs
-*.png
-
 # OS files
 .DS_Store
 Thumbs.db
