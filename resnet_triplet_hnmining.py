@@ -13,76 +13,142 @@ import json
 import pandas as pd
 
 
-class ProjectionHead(nn.Module):
-    """Projects ResNet features to embedding space: 2048 → 512 → 128"""
+class ResNetEncoder(nn.Module):
+    """ResNet50 encoder with projection head"""
 
-    def __init__(self, input_dim=2048, hidden_dim=512, output_dim=128):
-        super().__init__()
-        self.projection = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, output_dim),
-        )
-
-    def forward(self, x):
-        return self.projection(x)
-
-
-class HandMatchingModel(nn.Module):
-    """Twin network with shared ResNet50 encoder + projection head"""
-
-    def __init__(self, embedding_dim=128):
+    def __init__(self, embedding_dim=256):
         super().__init__()
         resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
         self.encoder = nn.Sequential(*list(resnet.children())[:-1])
-        self.projection = ProjectionHead(output_dim=embedding_dim)
+
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+        self.projection = nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(512, embedding_dim),
+        )
 
     def forward(self, x):
-        features = self.encoder(x)
-        features = features.view(features.size(0), -1)
+        with torch.set_grad_enabled(self.encoder.training):
+            features = self.encoder(x)
+            features = features.view(features.size(0), -1)
+
         embeddings = self.projection(features)
         embeddings = nn.functional.normalize(embeddings, p=2, dim=1)
         return embeddings
 
 
-class ContrastiveLoss(nn.Module):
-    """Contrastive loss: pulls positive pairs together, pushes negatives apart"""
+class TripletLoss(nn.Module):
+    """Triplet loss with online hard negative mining"""
 
-    def __init__(self, margin=2.0):
+    def __init__(self, margin=0.5, mining_strategy="hard"):
         super().__init__()
         self.margin = margin
+        self.mining_strategy = mining_strategy
 
-    def forward(self, embedding1, embedding2, label):
-        distance = torch.nn.functional.pairwise_distance(embedding1, embedding2)
-        positive_loss = label * torch.pow(distance, 2)
-        negative_loss = (1 - label) * torch.pow(
-            torch.clamp(self.margin - distance, min=0.0), 2
-        )
-        loss = torch.mean(positive_loss + negative_loss)
-        return loss
+    def forward(self, embeddings, labels):
+        """
+        Args:
+            embeddings: [batch_size, embedding_dim]
+            labels: [batch_size] - subject IDs (list or tensor)
+        """
+        if not isinstance(labels, torch.Tensor):
+            unique_labels = list(set(labels))
+            label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
+            label_indices = torch.tensor(
+                [label_to_idx[label] for label in labels], device=embeddings.device
+            )
+        else:
+            label_indices = labels
+
+        distances = torch.cdist(embeddings, embeddings, p=2)
+
+        batch_size = embeddings.size(0)
+        triplet_loss = 0.0
+        num_triplets = 0
+
+        for i in range(batch_size):
+            anchor_label = label_indices[i]
+
+            positive_mask = (label_indices == anchor_label).clone()
+            positive_mask[i] = False
+
+            if not positive_mask.any():
+                continue
+
+            negative_mask = label_indices != anchor_label
+
+            if not negative_mask.any():
+                continue
+
+            positive_distances = distances[i][positive_mask]
+            negative_distances = distances[i][negative_mask]
+
+            if self.mining_strategy == "hard":
+                hardest_positive_dist = positive_distances.max()
+                hardest_negative_dist = negative_distances.min()
+
+                loss = torch.clamp(
+                    hardest_positive_dist - hardest_negative_dist + self.margin, min=0.0
+                )
+                triplet_loss += loss
+                num_triplets += 1
+
+            elif self.mining_strategy == "semi-hard":
+                hardest_positive_dist = positive_distances.max()
+
+                semi_hard_negatives = negative_distances[
+                    (negative_distances > hardest_positive_dist)
+                    & (negative_distances < hardest_positive_dist + self.margin)
+                ]
+
+                if len(semi_hard_negatives) > 0:
+                    hardest_negative_dist = semi_hard_negatives.min()
+                else:
+                    hardest_negative_dist = negative_distances.min()
+
+                loss = torch.clamp(
+                    hardest_positive_dist - hardest_negative_dist + self.margin, min=0.0
+                )
+                triplet_loss += loss
+                num_triplets += 1
+
+            else:
+                for pos_dist in positive_distances:
+                    for neg_dist in negative_distances:
+                        loss = torch.clamp(pos_dist - neg_dist + self.margin, min=0.0)
+                        if loss > 0:
+                            triplet_loss += loss
+                            num_triplets += 1
+
+        if num_triplets == 0:
+            return torch.tensor(0.0, device=embeddings.device, requires_grad=True)
+
+        return triplet_loss / num_triplets
 
 
-class HandPairDataset(Dataset):
-    """Dataset for hand image pairs (dorsal-palmar matching)"""
+class HandBatchDataset(Dataset):
+    """Dataset for batch-based hard negative mining"""
 
     def __init__(
         self,
         data_root: Path,
         subject_ids: List[str],
         transform=None,
-        positive_ratio=0.5,
+        samples_per_subject=4,
     ):
         self.data_root = Path(data_root)
-        self.subject_ids = set(subject_ids)
+        self.subject_ids = list(subject_ids)
         self.transform = transform
-        self.positive_ratio = positive_ratio
+        self.samples_per_subject = samples_per_subject
 
         metadata_path = self.data_root / "HandInfo.csv"
         self.metadata = pd.read_csv(metadata_path)
-        self.metadata = self.metadata[
-            self.metadata["id"].astype(str).isin(self.subject_ids)
-        ]
+        self.metadata = self.metadata[self.metadata["id"].astype(str).isin(subject_ids)]
 
         self.subject_to_images = {}
 
@@ -103,44 +169,68 @@ class HandPairDataset(Dataset):
                 self.subject_to_images[subject_id] = {
                     "dorsal": dorsal_images,
                     "palmar": palmar_images,
+                    "all": dorsal_images + palmar_images,
                 }
 
         self.valid_subjects = list(self.subject_to_images.keys())
-        print(
-            f"Loaded {len(self.valid_subjects)} valid subjects with both dorsal and palmar images"
-        )
+        print(f"Loaded {len(self.valid_subjects)} valid subjects")
 
     def __len__(self):
         return len(self.valid_subjects) * 10
 
-    def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        is_positive = random.random() < self.positive_ratio
+    def __getitem__(self, idx):
+        subject_idx = idx % len(self.valid_subjects)
+        subject_id = self.valid_subjects[subject_idx]
 
-        if is_positive:
-            subject = random.choice(self.valid_subjects)
-            dorsal_img = random.choice(self.subject_to_images[subject]["dorsal"])
-            palmar_img = random.choice(self.subject_to_images[subject]["palmar"])
-            img1_path = self.data_root / "Hands" / dorsal_img
-            img2_path = self.data_root / "Hands" / palmar_img
-            label = 1
-        else:
-            subject1, subject2 = random.sample(self.valid_subjects, 2)
-            view1 = random.choice(["dorsal", "palmar"])
-            view2 = random.choice(["dorsal", "palmar"])
-            img1 = random.choice(self.subject_to_images[subject1][view1])
-            img2 = random.choice(self.subject_to_images[subject2][view2])
-            img1_path = self.data_root / "Hands" / img1
-            img2_path = self.data_root / "Hands" / img2
-            label = 0
+        all_images = self.subject_to_images[subject_id]["all"]
 
-        img1 = Image.open(img1_path).convert("RGB")
-        img2 = Image.open(img2_path).convert("RGB")
+        dorsal_images = self.subject_to_images[subject_id]["dorsal"]
+        palmar_images = self.subject_to_images[subject_id]["palmar"]
 
-        if self.transform:
-            img1 = self.transform(img1)
-            img2 = self.transform(img2)
+        samples = []
+        n_per_view = self.samples_per_subject // 2
 
-        return img1, img2, label
+        selected_dorsal = random.sample(
+            dorsal_images, min(n_per_view, len(dorsal_images))
+        )
+        selected_palmar = random.sample(
+            palmar_images, min(n_per_view, len(palmar_images))
+        )
+
+        selected_images = selected_dorsal + selected_palmar
+
+        while len(selected_images) < self.samples_per_subject and len(
+            selected_images
+        ) < len(all_images):
+            remaining = [img for img in all_images if img not in selected_images]
+            if remaining:
+                selected_images.append(random.choice(remaining))
+
+        images = []
+        for img_name in selected_images:
+            img_path = self.data_root / "Hands" / img_name
+            img = Image.open(img_path).convert("RGB")
+            if self.transform:
+                img = self.transform(img)
+            images.append(img)
+
+        images = torch.stack(images)
+
+        return images, subject_id
+
+
+def collate_batch_fn(batch):
+    """Custom collate function for batch-based training"""
+    all_images = []
+    all_labels = []
+
+    for images, subject_id in batch:
+        all_images.append(images)
+        all_labels.extend([subject_id] * images.size(0))
+
+    all_images = torch.cat(all_images, dim=0)
+
+    return all_images, all_labels
 
 
 class HandRetrievalDataset(Dataset):
@@ -164,7 +254,6 @@ class HandRetrievalDataset(Dataset):
 
         metadata_path = self.data_root / "HandInfo.csv"
         self.metadata = pd.read_csv(metadata_path)
-
         self.metadata = self.metadata[
             self.metadata["id"].astype(str).isin(self.subject_ids)
         ]
@@ -209,12 +298,7 @@ class HandRetrievalDataset(Dataset):
                     )
 
         print(
-            f"Retrieval dataset: {len(self.queries)} queries ({len(self.subject_ids)} subjects), "
-            f"{len(self.gallery)} gallery items ({len(self.subject_ids)} subjects)"
-        )
-        print(
-            f"Avg images per subject: Query={len(self.queries) / len(self.subject_ids):.1f}, "
-            f"Gallery={len(self.gallery) / len(self.subject_ids):.1f}"
+            f"Retrieval dataset: {len(self.queries)} queries, {len(self.gallery)} gallery items"
         )
 
     def get_query_loader(self, batch_size=32):
@@ -227,7 +311,7 @@ class HandRetrievalDataset(Dataset):
 
 
 class SingleImageDataset(Dataset):
-    """Helper dataset for single images (used in retrieval)"""
+    """Helper dataset for single images"""
 
     def __init__(self, image_list, transform=None):
         self.image_list = image_list
@@ -246,59 +330,41 @@ class SingleImageDataset(Dataset):
         return img, item["subject"]
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device, scaler=None):
-    """Train for one epoch with optional mixed precision"""
+def train_epoch_batch(model, dataloader, criterion, optimizer, device, scaler=None):
+    """Train for one epoch using batch-based hard negative mining"""
     model.train()
     total_loss = 0
+    num_batches = 0
 
     pbar = tqdm(dataloader, desc="Training")
-    for img1, img2, labels in pbar:
-        img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
+    for images, labels in pbar:
+        images = images.to(device)
 
         optimizer.zero_grad()
 
         if scaler is not None:
             with torch.amp.autocast(device_type="cuda"):
-                emb1 = model(img1)
-                emb2 = model(img2)
-                loss = criterion(emb1, emb2, labels.float())
+                embeddings = model(images)
+                loss = criterion(embeddings, labels)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            emb1 = model(img1)
-            emb2 = model(img2)
-            loss = criterion(emb1, emb2, labels.float())
+            embeddings = model(images)
+            loss = criterion(embeddings, labels)
             loss.backward()
             optimizer.step()
 
         total_loss += loss.item()
+        num_batches += 1
         pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-    return total_loss / len(dataloader)
-
-
-def validate(model, dataloader, criterion, device):
-    """Validate on validation set"""
-    model.eval()
-    total_loss = 0
-
-    with torch.no_grad():
-        for img1, img2, labels in tqdm(dataloader, desc="Validation"):
-            img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
-
-            emb1 = model(img1)
-            emb2 = model(img2)
-
-            loss = criterion(emb1, emb2, labels.float())
-            total_loss += loss.item()
-
-    return total_loss / len(dataloader)
+    return total_loss / num_batches
 
 
 def extract_embeddings(model, dataloader, device):
-    """Extract embeddings for all images in dataloader"""
+    """Extract embeddings for all images"""
     model.eval()
     embeddings = []
     subjects = []
@@ -338,19 +404,11 @@ def compute_retrieval_metrics(
 
         return np.array(aggregated_embeddings), unique_subjects
 
-    print("Aggregating query embeddings by subject...")
     query_agg, query_subjects_unique = aggregate_by_subject(
         query_embeddings, query_subjects
     )
-
-    print("Aggregating gallery embeddings by subject...")
     gallery_agg, gallery_subjects_unique = aggregate_by_subject(
         gallery_embeddings, gallery_subjects
-    )
-
-    print(
-        f"Aggregated to {len(query_subjects_unique)} unique query subjects "
-        f"and {len(gallery_subjects_unique)} unique gallery subjects"
     )
 
     similarities = query_agg @ gallery_agg.T
@@ -375,7 +433,7 @@ def compute_retrieval_metrics(
                 if correct_match_rank <= k:
                     recall_at_k[k] += 1
 
-    mean_rank = np.mean(ranks)
+    mean_rank = np.mean(ranks) if ranks else float("inf")
     num_queries = len(query_subjects_unique)
 
     metrics = {
@@ -408,17 +466,19 @@ def evaluate_retrieval(model, retrieval_dataset, device):
 def main():
     config = {
         "data_root": ".",
-        "embedding_dim": 128,
-        "margin": 2.0,
-        "batch_size": 64,
+        "embedding_dim": 256,
+        "triplet_margin": 0.5,
+        "mining_strategy": "hard",
+        "batch_size": 16,
+        "samples_per_subject": 4,
         "num_epochs": 30,
         "lr": 1e-4,
         "weight_decay": 1e-5,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "checkpoint_dir": "./checkpoints",
+        "checkpoint_dir": "./checkpoints_resnet_triplet",
         "seed": 42,
-        "num_workers": 8,
-        "prefetch_factor": 4,
+        "num_workers": 4,
+        "prefetch_factor": 2,
     }
 
     print(f"CUDA available: {torch.cuda.is_available()}")
@@ -427,6 +487,12 @@ def main():
         print(
             f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB"
         )
+
+    print(f"\nConfiguration:")
+    print(f"  - Model: ResNet50")
+    print(f"  - Loss: Triplet with {config['mining_strategy']} negative mining")
+    print(f"  - Embedding dim: {config['embedding_dim']}")
+    print(f"  - Margin: {config['triplet_margin']}")
 
     random.seed(config["seed"])
     np.random.seed(config["seed"])
@@ -459,7 +525,7 @@ def main():
     metadata = pd.read_csv(metadata_path)
 
     all_subjects = metadata["id"].astype(str).unique().tolist()
-    print(f"Found {len(all_subjects)} unique subjects in dataset")
+    print(f"\nFound {len(all_subjects)} unique subjects in dataset")
 
     random.shuffle(all_subjects)
 
@@ -475,11 +541,11 @@ def main():
     print(f"Val: {len(val_subjects)} subjects")
     print(f"Test: {len(test_subjects)} subjects")
 
-    train_dataset = HandPairDataset(
-        config["data_root"], train_subjects, transform=train_transform
-    )
-    val_dataset = HandPairDataset(
-        config["data_root"], val_subjects, transform=val_transform
+    train_dataset = HandBatchDataset(
+        config["data_root"],
+        train_subjects,
+        transform=train_transform,
+        samples_per_subject=config["samples_per_subject"],
     )
 
     val_retrieval = HandRetrievalDataset(
@@ -496,67 +562,52 @@ def main():
         num_workers=config["num_workers"],
         pin_memory=True,
         prefetch_factor=config["prefetch_factor"],
-        persistent_workers=True,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config["batch_size"],
-        shuffle=False,
-        num_workers=config["num_workers"],
-        pin_memory=True,
-        prefetch_factor=config["prefetch_factor"],
-        persistent_workers=True,
+        persistent_workers=True if config["num_workers"] > 0 else False,
+        collate_fn=collate_batch_fn,
     )
 
     device = torch.device(config["device"])
-    model = HandMatchingModel(embedding_dim=config["embedding_dim"]).to(device)
+    print("\nLoading ResNet50 model...")
+    model = ResNetEncoder(embedding_dim=config["embedding_dim"]).to(device)
+    print("Model loaded successfully!")
 
-    use_compile = False
-    if use_compile and hasattr(torch, "compile"):
-        try:
-            model = torch.compile(model)
-            print("Model compiled with torch.compile")
-        except Exception as e:
-            print(f"Could not compile model: {e}")
-
-    criterion = ContrastiveLoss(margin=config["margin"])
-    optimizer = optim.Adam(
-        model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"]
+    criterion = TripletLoss(
+        margin=config["triplet_margin"], mining_strategy=config["mining_strategy"]
     )
+
+    optimizer = optim.AdamW(
+        model.projection.parameters(),
+        lr=config["lr"],
+        weight_decay=config["weight_decay"],
+    )
+    print("Optimizing projection head only (backbone frozen)")
 
     scaler = torch.amp.GradScaler("cuda") if config["device"] == "cuda" else None
     if scaler:
         print("Using mixed precision training (AMP)")
 
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=0.5,
-        patience=5,
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config["num_epochs"], eta_min=1e-6
     )
 
-    best_val_loss = float("inf")
     best_mean_rank = float("inf")
 
     training_history = {
         "train_loss": [],
-        "val_loss": [],
         "val_mean_rank": [],
         "val_recall@1": [],
     }
 
     for epoch in range(config["num_epochs"]):
         print(f"\nEpoch {epoch + 1}/{config['num_epochs']}")
+        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
 
-        train_loss = train_epoch(
+        train_loss = train_epoch_batch(
             model, train_loader, criterion, optimizer, device, scaler
         )
         print(f"Train Loss: {train_loss:.4f}")
 
-        val_loss = validate(model, val_loader, criterion, device)
-        print(f"Val Loss: {val_loss:.4f}")
-
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 5 == 0 or epoch == 0:
             metrics = evaluate_retrieval(model, val_retrieval, device)
             print(
                 f"Val Retrieval - Mean Rank: {metrics['mean_rank']:.2f}, "
@@ -573,32 +624,19 @@ def main():
                         "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
                         "mean_rank": best_mean_rank,
+                        "metrics": metrics,
                         "config": config,
                     },
                     f"{config['checkpoint_dir']}/best_model.pth",
                 )
                 print(f"Saved new best model (mean rank: {best_mean_rank:.2f})")
 
-        scheduler.step(val_loss)
+        scheduler.step()
 
         training_history["train_loss"].append(train_loss)
-        training_history["val_loss"].append(val_loss)
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 5 == 0 or epoch == 0:
             training_history["val_mean_rank"].append(metrics["mean_rank"])
             training_history["val_recall@1"].append(metrics["recall@1"])
-
-        if (epoch + 1) % 10 == 0 and val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": best_val_loss,
-                    "config": config,
-                },
-                f"{config['checkpoint_dir']}/checkpoint_epoch_{epoch + 1}.pth",
-            )
 
     print("\n" + "=" * 50)
     print("Final Evaluation on Test Set")
@@ -610,16 +648,25 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
 
     test_metrics = evaluate_retrieval(model, test_retrieval, device)
-    print(f"Test Retrieval - Mean Rank: {test_metrics['mean_rank']:.2f}")
-    print(f"Recall@1: {test_metrics['recall@1']:.3f}")
-    print(f"Recall@5: {test_metrics['recall@5']:.3f}")
-    print(f"Recall@10: {test_metrics['recall@10']:.3f}")
+    print(f"\nTest Results:")
+    print(f"  Mean Rank: {test_metrics['mean_rank']:.2f}")
+    print(f"  Recall@1:  {test_metrics['recall@1']:.3f}")
+    print(f"  Recall@5:  {test_metrics['recall@5']:.3f}")
+    print(f"  Recall@10: {test_metrics['recall@10']:.3f}")
+
+    results = {
+        "test_metrics": test_metrics,
+        "val_metrics": checkpoint.get("metrics", {}),
+        "config": config,
+    }
 
     with open(f"{config['checkpoint_dir']}/test_results.json", "w") as f:
-        json.dump(test_metrics, f, indent=2)
+        json.dump(results, f, indent=2)
 
     with open(f"{config['checkpoint_dir']}/training_history.json", "w") as f:
         json.dump(training_history, f, indent=2)
+
+    print(f"\nResults saved to {config['checkpoint_dir']}/test_results.json")
 
 
 if __name__ == "__main__":

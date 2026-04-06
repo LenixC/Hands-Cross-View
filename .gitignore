@@ -1,0 +1,25 @@
+# Checkpoints (trained models)
+checkpoints/
+checkpoints_dinov2/
+checkpoints_dinov2_contrastive/
+checkpoints_resnet_triplet/
+
+# Data (don't commit ~11k images)
+Hands/
+HandInfo.csv
+11k_hands_data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Linting
+.ruff_cache/
+
+# Generated outputs
+*.png
+
+# OS files
+.DS_Store
+Thumbs.db

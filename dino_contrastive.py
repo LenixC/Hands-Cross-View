@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, models
+from torchvision import transforms
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -13,35 +13,31 @@ import json
 import pandas as pd
 
 
-class ProjectionHead(nn.Module):
-    """Projects ResNet features to embedding space: 2048 → 512 → 128"""
+class DINOv2Encoder(nn.Module):
+    """DINOv2 ViT-B/14 encoder with projection head"""
 
-    def __init__(self, input_dim=2048, hidden_dim=512, output_dim=128):
+    def __init__(self, embedding_dim=128, freeze_backbone=False):
         super().__init__()
+        self.backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
         self.projection = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.Linear(768, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, output_dim),
+            nn.Dropout(0.1),
+            nn.Linear(512, embedding_dim),
         )
 
     def forward(self, x):
-        return self.projection(x)
+        with torch.set_grad_enabled(self.backbone.training):
+            features = self.backbone(x)
 
-
-class HandMatchingModel(nn.Module):
-    """Twin network with shared ResNet50 encoder + projection head"""
-
-    def __init__(self, embedding_dim=128):
-        super().__init__()
-        resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-        self.encoder = nn.Sequential(*list(resnet.children())[:-1])
-        self.projection = ProjectionHead(output_dim=embedding_dim)
-
-    def forward(self, x):
-        features = self.encoder(x)
-        features = features.view(features.size(0), -1)
         embeddings = self.projection(features)
+
         embeddings = nn.functional.normalize(embeddings, p=2, dim=1)
         return embeddings
 
@@ -410,15 +406,16 @@ def main():
         "data_root": ".",
         "embedding_dim": 128,
         "margin": 2.0,
-        "batch_size": 64,
+        "batch_size": 16,
         "num_epochs": 30,
         "lr": 1e-4,
         "weight_decay": 1e-5,
+        "freeze_backbone": True,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "checkpoint_dir": "./checkpoints",
+        "checkpoint_dir": "./checkpoints_dinov2_contrastive",
         "seed": 42,
-        "num_workers": 8,
-        "prefetch_factor": 4,
+        "num_workers": 2,
+        "prefetch_factor": 2,
     }
 
     print(f"CUDA available: {torch.cuda.is_available()}")
@@ -427,6 +424,13 @@ def main():
         print(
             f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB"
         )
+
+    print(f"\nConfiguration:")
+    print(f"  - Model: DINOv2 ViT-B/14")
+    print(f"  - Loss: Contrastive Loss")
+    print(f"  - Embedding dim: {config['embedding_dim']}")
+    print(f"  - Margin: {config['margin']}")
+    print(f"  - Backbone frozen: {config['freeze_backbone']}")
 
     random.seed(config["seed"])
     np.random.seed(config["seed"])
@@ -439,8 +443,10 @@ def main():
             transforms.Resize(256),
             transforms.RandomCrop(224),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(
+                brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1
+            ),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
@@ -459,7 +465,7 @@ def main():
     metadata = pd.read_csv(metadata_path)
 
     all_subjects = metadata["id"].astype(str).unique().tolist()
-    print(f"Found {len(all_subjects)} unique subjects in dataset")
+    print(f"\nFound {len(all_subjects)} unique subjects in dataset")
 
     random.shuffle(all_subjects)
 
@@ -496,7 +502,7 @@ def main():
         num_workers=config["num_workers"],
         pin_memory=True,
         prefetch_factor=config["prefetch_factor"],
-        persistent_workers=True,
+        persistent_workers=True if config["num_workers"] > 0 else False,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -505,24 +511,30 @@ def main():
         num_workers=config["num_workers"],
         pin_memory=True,
         prefetch_factor=config["prefetch_factor"],
-        persistent_workers=True,
+        persistent_workers=True if config["num_workers"] > 0 else False,
     )
 
     device = torch.device(config["device"])
-    model = HandMatchingModel(embedding_dim=config["embedding_dim"]).to(device)
-
-    use_compile = False
-    if use_compile and hasattr(torch, "compile"):
-        try:
-            model = torch.compile(model)
-            print("Model compiled with torch.compile")
-        except Exception as e:
-            print(f"Could not compile model: {e}")
+    print("\nLoading DINOv2 model...")
+    model = DINOv2Encoder(
+        embedding_dim=config["embedding_dim"], freeze_backbone=config["freeze_backbone"]
+    ).to(device)
+    print("Model loaded successfully!")
 
     criterion = ContrastiveLoss(margin=config["margin"])
-    optimizer = optim.Adam(
-        model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"]
-    )
+
+    if config["freeze_backbone"]:
+        optimizer = optim.AdamW(
+            model.projection.parameters(),
+            lr=config["lr"],
+            weight_decay=config["weight_decay"],
+        )
+        print("Optimizing projection head only (backbone frozen)")
+    else:
+        optimizer = optim.AdamW(
+            model.parameters(), lr=config["lr"], weight_decay=config["weight_decay"]
+        )
+        print("Optimizing full model")
 
     scaler = torch.amp.GradScaler("cuda") if config["device"] == "cuda" else None
     if scaler:
@@ -556,7 +568,7 @@ def main():
         val_loss = validate(model, val_loader, criterion, device)
         print(f"Val Loss: {val_loss:.4f}")
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 5 == 0 or epoch == 0:
             metrics = evaluate_retrieval(model, val_retrieval, device)
             print(
                 f"Val Retrieval - Mean Rank: {metrics['mean_rank']:.2f}, "
@@ -583,22 +595,9 @@ def main():
 
         training_history["train_loss"].append(train_loss)
         training_history["val_loss"].append(val_loss)
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 5 == 0 or epoch == 0:
             training_history["val_mean_rank"].append(metrics["mean_rank"])
             training_history["val_recall@1"].append(metrics["recall@1"])
-
-        if (epoch + 1) % 10 == 0 and val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": best_val_loss,
-                    "config": config,
-                },
-                f"{config['checkpoint_dir']}/checkpoint_epoch_{epoch + 1}.pth",
-            )
 
     print("\n" + "=" * 50)
     print("Final Evaluation on Test Set")

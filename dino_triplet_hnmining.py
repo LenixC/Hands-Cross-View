@@ -542,7 +542,7 @@ def evaluate_retrieval(model, retrieval_dataset, device):
 
 def main():
     config = {
-        "data_root": "./11k_hands_data",
+        "data_root": ".",
         "embedding_dim": 256,
         "triplet_margin": 0.5,
         "mining_strategy": "hard",  # 'hard', 'semi-hard', or 'all'
@@ -682,8 +682,14 @@ def main():
 
     best_mean_rank = float("inf")
 
+    training_history = {
+        "train_loss": [],
+        "val_mean_rank": [],
+        "val_recall@1": [],
+    }
+
     for epoch in range(config["num_epochs"]):
-        print(f"\nEpoch {epoch+1}/{config['num_epochs']}")
+        print(f"\nEpoch {epoch + 1}/{config['num_epochs']}")
         print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
 
         train_loss = train_epoch_batch(
@@ -717,6 +723,11 @@ def main():
 
         scheduler.step()
 
+        training_history["train_loss"].append(train_loss)
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            training_history["val_mean_rank"].append(metrics["mean_rank"])
+            training_history["val_recall@1"].append(metrics["recall@1"])
+
         if (epoch + 1) % 10 == 0:
             torch.save(
                 {
@@ -725,7 +736,7 @@ def main():
                     "optimizer_state_dict": optimizer.state_dict(),
                     "config": config,
                 },
-                f"{config['checkpoint_dir']}/checkpoint_epoch_{epoch+1}.pth",
+                f"{config['checkpoint_dir']}/checkpoint_epoch_{epoch + 1}.pth",
             )
 
     print("\n" + "=" * 70)
@@ -752,6 +763,9 @@ def main():
 
     with open(f"{config['checkpoint_dir']}/test_results.json", "w") as f:
         json.dump(results, f, indent=2)
+
+    with open(f"{config['checkpoint_dir']}/training_history.json", "w") as f:
+        json.dump(training_history, f, indent=2)
 
     print(f"\nResults saved to {config['checkpoint_dir']}/test_results.json")
 
