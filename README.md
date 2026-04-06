@@ -83,8 +83,9 @@ This forces the model to learn from the most difficult examples rather than easy
 
 ### Key Comparisons
 
-- **Backbone effect (DINOv2 vs ResNet50)**: +24% R@1 with Contrastive loss
-- **Loss effect (Triplet+HN vs Contrastive)**: +41% R@1 with ResNet50
+- **Loss effect (Triplet+HN vs Contrastive)**: +41% R@1 (ResNet) to +29% (DINOv2)
+- **Backbone effect (DINOv2 vs ResNet)**: +24% R@1 (Contrastive) to +12% (Triplet+HN)
+- **Loss matters more than backbone**: Triplet+HN gives larger gains than switching backbones
 - **Best combination**: DINOv2 + Triplet+HN at 61% R@1
 
 ### Random Baseline
@@ -94,15 +95,19 @@ A random baseline (guessing) would achieve:
 
 Both learned models significantly outperform random guessing, with DINOv2 achieving near-perfect retrieval in the top 10 results.
 
+![Experiment Comparison](experiment_comparison.png)
+
 ## Key Findings
 
-1. **Backbone matters more than loss**: DINOv2's self-supervised features (+24% R@1) outperform ResNet50 across both loss functions.
+1. **Loss function matters more than backbone**: Triplet+HN gives +41% (ResNet) vs backbone switch giving +24%.
 
 2. **Hard negative mining provides large gains**: Triplet+HN improves R@1 by 41% (ResNet) to 29% (DINOv2) over Contrastive loss.
 
-3. **Combined effect is multiplicative**: Best model (DINOv2 + Triplet+HN) achieves 61% R@1, 8x better than baseline (ResNet + Contrastive at 7.3%).
+3. **Backbone still matters**: DINOv2's self-supervised features provide consistent +12-24% improvement across loss functions.
 
-4. **Near-perfect top-10 retrieval**: Best model achieves 97.6% Recall@10, meaning the correct match is almost always in the top 10 results.
+4. **Combined effect is multiplicative**: Best model (DINOv2 + Triplet+HN) achieves 61% R@1, 8x better than baseline (ResNet + Contrastive at 7.3%).
+
+5. **Near-perfect top-10 retrieval**: Best model achieves 97.6% Recall@10, meaning the correct match is almost always in the top 10 results.
 
 ## Limitations
 

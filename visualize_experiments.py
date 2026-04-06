@@ -371,19 +371,16 @@ def main():
     parser.add_argument("--show", action="store_true", help="Show plot interactively")
     args = parser.parse_args()
 
-    fig = plt.figure(figsize=(16, 12))
+    fig = plt.figure(figsize=(15, 5))
     fig.suptitle(
         "Cross-View Hand Matching: Experiment Comparison",
         fontsize=16,
         fontweight="bold",
     )
 
-    ax1 = fig.add_subplot(2, 3, 1)
-    ax2 = fig.add_subplot(2, 3, 2)
-    ax3 = fig.add_subplot(2, 3, 3)
-    ax4 = fig.add_subplot(2, 3, 4)
-    ax5 = fig.add_subplot(2, 3, 5)
-    ax6 = fig.add_subplot(2, 3, 6)
+    ax1 = fig.add_subplot(1, 3, 1)
+    ax2 = fig.add_subplot(1, 3, 2)
+    ax3 = fig.add_subplot(1, 3, 3)
 
     print("Creating comparison table...")
     table = create_comparison_table()
@@ -391,13 +388,9 @@ def main():
         print("\n" + table.to_string(index=False))
 
     print("\nGenerating plots...")
-    plot_recall_curves(ax1)
+    plot_comparison_bars(ax1, ["recall@1", "recall@5", "recall@10"], "Recall@k")
     plot_mean_rank_comparison(ax2)
-    plot_training_curves(ax3)
-    create_ablation_summary(ax4)
-
-    plot_comparison_bars(ax5, ["recall@1", "recall@5", "recall@10"], "Recall Metrics")
-    plot_recall_over_training(ax6)
+    create_ablation_summary(ax3)
 
     plt.tight_layout()
     plt.savefig(args.output, dpi=150, bbox_inches="tight")
