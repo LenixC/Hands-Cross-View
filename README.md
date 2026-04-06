@@ -173,6 +173,26 @@ pip install torch torchvision tqdm pandas pillow numpy
 Minimum: 8GB GPU VRAM (with frozen backbone)  
 Recommended: 12-16GB GPU VRAM (for full fine-tuning)
 
+## Interactive Demo
+
+An interactive retrieval demo is included to explore the model's cross-view matching in action. 
+
+![Retrieval Demo](demo_screenshot.png)
+
+**Try it yourself:**
+```bash
+# Start a local server
+python -m http.server 8000
+
+# Open in browser
+# http://localhost:8000/demo.html
+```
+
+Features:
+- Select any dorsal (back of hand) query image
+- See top 10 palmar (palm) matches with similarity scores
+- Green borders highlight correct matches
+
 ## References
 
 [1] Afifi, M. (2019). "11K Hands: Gender recognition and biometric identification using a large dataset of hand images." *Multimedia Tools and Applications*. https://doi.org/10.1007/s11042-019-7424-8

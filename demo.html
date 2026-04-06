@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cross-View Hand Matching Demo</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 { color: #333; margin-bottom: 10px; }
+        .description { color: #666; margin-bottom: 20px; }
+        
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        select, button {
+            padding: 10px 15px;
+            font-size: 14px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+        
+        button {
+            background: #2563eb;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        
+        button:hover { background: #1d4ed8; }
+        
+        .query-panel {
+            display: grid;
+            grid-template-columns: 200px 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .query-image {
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .query-image img {
+            width: 100%;
+            border-radius: 4px;
+        }
+        
+        .query-image .label {
+            margin-top: 8px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .query-image .subject {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .results-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .result-card {
+            background: #f9fafb;
+            border-radius: 8px;
+            overflow: hidden;
+            transition: transform 0.2s;
+        }
+        
+        .result-card:hover {
+            transform: scale(1.02);
+        }
+        
+        .result-card img {
+            width: 100%;
+            height: 120px;
+            object-fit: cover;
+        }
+        
+        .result-card .info {
+            padding: 8px;
+        }
+        
+        .result-card .rank {
+            font-weight: bold;
+            color: #2563eb;
+        }
+        
+        .result-card .distance {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .result-card .subject {
+            font-size: 12px;
+            color: #999;
+        }
+        
+        .result-card.match {
+            border: 3px solid #22c55e;
+        }
+        
+        .result-card .match-label {
+            background: #22c55e;
+            color: white;
+            padding: 4px 8px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .stats {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #eff6ff;
+            border-radius: 8px;
+        }
+        
+        .stat {
+            text-align: center;
+        }
+        
+        .stat .value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2563eb;
+        }
+        
+        .stat .label {
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>Cross-View Hand Matching Demo</h1>
+    <p class="description">Select a dorsal (back) view hand image as query, and find the matching palmar (palm) view from the same person.</p>
+    
+    <div class="stats">
+        <div class="stat">
+            <div class="value" id="numQueries">-</div>
+            <div class="label">Query Images</div>
+        </div>
+        <div class="stat">
+            <div class="value" id="numGallery">-</div>
+            <div class="label">Gallery Images</div>
+        </div>
+        <div class="stat">
+            <div class="value" id="numSubjects">-</div>
+            <div class="label">Subjects</div>
+        </div>
+    </div>
+    
+    <div class="controls">
+        <label>Select a dorsal (back of hand) image as query:</label>
+        <select id="querySelect">
+            <option value="">-- Select a query image --</option>
+        </select>
+        <button id="randomBtn">Random Query</button>
+        <span style="color: #666; margin-left: 20px;">Showing top 10 matches</span>
+    </div>
+    
+    <div class="query-panel" id="queryPanel" style="display: none;">
+        <div class="query-image">
+            <img id="queryImg" src="" alt="Query">
+            <div class="label">Query (Dorsal View)</div>
+            <div class="subject" id="querySubject"></div>
+        </div>
+        
+        <div class="results-panel">
+            <h3>Top 10 Matches (Palmar View)</h3>
+            <div class="results-grid" id="resultsGrid"></div>
+        </div>
+    </div>
+    
+    <div class="loading" id="loading">Loading embeddings...</div>
+    
+    <script>
+        let dorsalData = [];
+        let palmarData = [];
+        
+        async function loadEmbeddings() {
+            try {
+                const response = await fetch('embeddings_demo.json');
+                const data = await response.json();
+                dorsalData = data.dorsal;
+                palmarData = data.palmar;
+                
+                document.getElementById('loading').style.display = 'none';
+                
+                // Update stats
+                const subjects = new Set([...dorsalData.map(d => d.subject), ...palmarData.map(d => d.subject)]);
+                document.getElementById('numQueries').textContent = dorsalData.length;
+                document.getElementById('numGallery').textContent = palmarData.length;
+                document.getElementById('numSubjects').textContent = subjects.size;
+                
+                // Populate select
+                const select = document.getElementById('querySelect');
+                dorsalData.forEach((item, idx) => {
+                    const opt = document.createElement('option');
+                    opt.value = idx;
+                    opt.textContent = `Subject ${item.subject} - ${item.path.split('/').pop()}`;
+                    select.appendChild(opt);
+                });
+                
+            } catch (e) {
+                document.getElementById('loading').textContent = 'Error loading embeddings: ' + e.message;
+            }
+        }
+        
+        function cosineSimilarity(a, b) {
+            let dot = 0;
+            let magA = 0;
+            let magB = 0;
+            for (let i = 0; i < a.length; i++) {
+                dot += a[i] * b[i];
+                magA += a[i] * a[i];
+                magB += b[i] * b[i];
+            }
+            return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+        }
+        
+        function findMatches(queryEmb, querySubject) {
+            const results = palmarData.map(item => {
+                const similarity = cosineSimilarity(queryEmb, item.embedding);
+                return {
+                    ...item,
+                    similarity: similarity,
+                    distance: 1 - similarity,
+                    isMatch: item.subject === querySubject
+                };
+            });
+            
+            return results.sort((a, b) => a.distance - b.distance).slice(0, 10);
+        }
+        
+        function showResults(queryItem, matches) {
+            document.getElementById('queryPanel').style.display = 'grid';
+            document.getElementById('queryImg').src = queryItem.path;
+            document.getElementById('querySubject').textContent = 'Subject ' + queryItem.subject;
+            
+            const grid = document.getElementById('resultsGrid');
+            grid.innerHTML = '';
+            
+            matches.forEach((match, idx) => {
+                const card = document.createElement('div');
+                card.className = 'result-card' + (match.isMatch ? ' match' : '');
+                
+                let labelHtml = '';
+                if (match.isMatch) {
+                    labelHtml = '<div class="match-label">MATCH</div>';
+                }
+                
+                card.innerHTML = `
+                    ${labelHtml}
+                    <img src="${match.path}" alt="Match ${idx + 1}">
+                    <div class="info">
+                        <div class="rank">#${idx + 1}</div>
+                        <div class="distance">Similarity: ${(match.similarity * 100).toFixed(1)}%</div>
+                        <div class="subject">Subject ${match.subject}</div>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+        
+        document.getElementById('querySelect').addEventListener('change', function() {
+            const idx = parseInt(this.value);
+            if (isNaN(idx)) return;
+            
+            const queryItem = dorsalData[idx];
+            const matches = findMatches(queryItem.embedding, queryItem.subject);
+            showResults(queryItem, matches);
+        });
+        
+        document.getElementById('randomBtn').addEventListener('click', function() {
+            const idx = Math.floor(Math.random() * dorsalData.length);
+            document.getElementById('querySelect').value = idx;
+            
+            const queryItem = dorsalData[idx];
+            const matches = findMatches(queryItem.embedding, queryItem.subject);
+            showResults(queryItem, matches);
+        });
+        
+        loadEmbeddings();
+    </script>
+</body>
+</html>
