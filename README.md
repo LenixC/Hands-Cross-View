@@ -72,12 +72,20 @@ This forces the model to learn from the most difficult examples rather than easy
 
 ## Results
 
-| Metric | ResNet50 + Contrastive | DINOv2 + Triplet | Improvement |
-|--------|------------------------|------------------|-------------|
-| **Mean Rank** | 12.20 | 2.51 | **+79%** |
-| **Recall@1** | 9.8% | 61.0% | **+525%** |
-| **Recall@5** | 41.5% | 90.2% | **+118%** |
-| **Recall@10** | 63.4% | 95.1% | **+50%** |
+### Full Experiment Matrix
+
+| Model | Loss | Mean Rank | R@1 | R@5 | R@10 |
+|-------|------|-----------|-----|-----|------|
+| ResNet50 | Contrastive | 11.78 | 7.3% | 24.4% | 53.7% |
+| ResNet50 | Triplet+HN | 3.61 | 48.8% | 80.5% | 92.7% |
+| DINOv2 | Contrastive | 6.56 | 31.7% | 65.9% | 82.9% |
+| DINOv2 | Triplet+HN | 2.90 | 61.0% | 80.5% | 97.6% |
+
+### Key Comparisons
+
+- **Backbone effect (DINOv2 vs ResNet50)**: +24% R@1 with Contrastive loss
+- **Loss effect (Triplet+HN vs Contrastive)**: +41% R@1 with ResNet50
+- **Best combination**: DINOv2 + Triplet+HN at 61% R@1
 
 ### Random Baseline
 A random baseline (guessing) would achieve:
@@ -88,11 +96,13 @@ Both learned models significantly outperform random guessing, with DINOv2 achiev
 
 ## Key Findings
 
-1. **Hard negative mining matters**: By selecting challenging negatives rather than random ones, the model learns more discriminative features. This resulted in 6x improvement in top-1 accuracy.
+1. **Backbone matters more than loss**: DINOv2's self-supervised features (+24% R@1) outperform ResNet50 across both loss functions.
 
-2. **Self-supervised features transfer well**: DINOv2's pretraining on 142M images provides better feature representations than ImageNet-supervised ResNet50 for this cross-view matching task.
+2. **Hard negative mining provides large gains**: Triplet+HN improves R@1 by 41% (ResNet) to 29% (DINOv2) over Contrastive loss.
 
-3. **Triplet loss for retrieval**: Directly optimizing for ranking (triplet loss) outperforms pair-based contrastive loss, achieving 95% top-10 accuracy.
+3. **Combined effect is multiplicative**: Best model (DINOv2 + Triplet+HN) achieves 61% R@1, 8x better than baseline (ResNet + Contrastive at 7.3%).
+
+4. **Near-perfect top-10 retrieval**: Best model achieves 97.6% Recall@10, meaning the correct match is almost always in the top 10 results.
 
 ## Limitations
 
@@ -120,24 +130,34 @@ With more computational resources:
 
 ## Usage
 
-**Train baseline:**
+**Run all 4 experiments:**
 ```bash
-python resnet_contrastive.py
+python resnet_contrastive.py       # ResNet50 + Contrastive
+python dino_contrastive.py         # DINOv2 + Contrastive  
+python resnet_triplet_hnmining.py # ResNet50 + Triplet+HN
+python dino_triplet_hnmining.py   # DINOv2 + Triplet+HN
 ```
 
-**Train DINOv2 model:**
+**Visualize results:**
 ```bash
-python dino_triplet_hnmining.py
+python visualize_experiments.py -o comparison.png
 ```
 
-**Memory-saving config** (edit in dinov2_triplet_model.py):
-```python
-config = {
-    'freeze_backbone': True,  # Only train projection head
-    'batch_size': 8,          # Reduce if OOM
-    'samples_per_subject': 2,
-}
+## Data Setup
+
+The dataset should be placed in the project root with the following structure:
 ```
+.
+├── Hands/            # 11,076 hand images
+├── HandInfo.csv     # Metadata file
+├── resnet_contrastive.py
+├── dino_contrastive.py
+├── resnet_triplet_hnmining.py
+├── dino_triplet_hnmining.py
+└── visualize_experiments.py
+```
+
+Download from: https://github.com/mahmoudnafifi/11K-Hands
 
 ## Requirements
 
